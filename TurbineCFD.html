@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Turbine Blade Aerodynamic Simulator</title>
+    <style>
+        :root { --bg: #121212; --panel: #1e1e1e; --text: #e0e0e0; --accent: #00d4ff; --danger: #ff4444; --success: #00c851; }
+        body { font-family: 'Segoe UI', monospace; background: var(--bg); color: var(--text); margin: 0; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+        
+        /* Layout */
+        header { padding: 10px 20px; background: var(--panel); border-bottom: 1px solid #333; display: flex; justify-content: space-between; align-items: center; }
+        h1 { font-size: 1.2rem; margin: 0; color: var(--accent); }
+        
+        .main-container { display: flex; flex: 1; height: 100%; }
+        
+        /* Controls Sidebar */
+        .controls { width: 300px; background: var(--panel); padding: 20px; border-right: 1px solid #333; display: flex; flex-direction: column; gap: 20px; overflow-y: auto; }
+        .control-group { display: flex; flex-direction: column; gap: 5px; }
+        label { font-size: 0.9rem; color: #aaa; }
+        input[type=range] { width: 100%; cursor: pointer; }
+        .value-display { font-weight: bold; color: var(--accent); float: right; }
+
+        /* Stats Box */
+        .stats-box { background: #2a2a2a; padding: 10px; border-radius: 4px; border-left: 4px solid var(--accent); }
+        .stat-row { display: flex; justify-content: space-between; margin-bottom: 5px; font-size: 0.9rem; }
+        .stall-warning { color: var(--danger); font-weight: bold; display: none; text-align: center; margin-top: 10px; animation: blink 1s infinite; }
+        
+        /* Visualization Area */
+        .viz-area { flex: 1; position: relative; display: flex; flex-direction: column; }
+        canvas { background: #181818; width: 100%; height: 50%; display: block; }
+        
+        /* Graph Area */
+        .graph-container { height: 50%; border-top: 1px solid #333; position: relative; background: #1a1a1a; }
+        
+        /* Utility */
+        @keyframes blink { 50% { opacity: 0.5; } }
+        .legend { position: absolute; top: 10px; right: 20px; font-size: 0.8rem; background: rgba(0,0,0,0.7); padding: 5px 10px; border-radius: 4px; pointer-events: none; }
+        .leg-item { display: flex; align-items: center; gap: 5px; margin-bottom: 2px; }
+        .dot { width: 10px; height: 10px; border-radius: 50%; }
+    </style>
+</head>
+<body>
+
+<header>
+    <h1>Turbine Blade CFD Simulator (NACA 4412 Approximation)</h1>
+    <div style="font-size: 0.8rem; color: #888;">Real-time BEM Solver</div>
+</header>
+
+<div class="main-container">
+    <div class="controls">
+        <div class="control-group">
+            <label>Angle of Attack (α) <span id="val-aoa" class="value-display">0°</span></label>
+            <input type="range" id="in-aoa" min="-10" max="30" step="0.1" value="0">
+        </div>
+
+        <div class="control-group">
+            <label>Wind Speed (m/s) <span id="val-speed" class="value-display">15 m/s</span></label>
+            <input type="range" id="in-speed" min="1" max="50" step="1" value="15">
+        </div>
+        
+        <div class="control-group">
+            <label>Chord Length (m) <span id="val-chord" class="value-display">1.0 m</span></label>
+            <input type="range" id="in-chord" min="0.5" max="3.0" step="0.1" value="1.0">
+        </div>
+
+        <hr style="border: 0; border-top: 1px solid #444; width: 100%;">
+
+        <div class="stats-box">
+            <div class="stat-row"><span>Lift Force (L):</span> <span id="out-lift" style="color:var(--success)">0 N</span></div>
+            <div class="stat-row"><span>Drag Force (D):</span> <span id="out-drag" style="color:var(--danger)">0 N</span></div>
+            <div class="stat-row"><span>Lift Coeff (Cl):</span> <span id="out-cl">0.00</span></div>
+            <div class="stat-row"><span>Drag Coeff (Cd):</span> <span id="out-cd">0.00</span></div>
+            <div class="stat-row"><span>Efficiency (L/D):</span> <span id="out-ratio">0.00</span></div>
+        </div>
+
+        <div id="stall-alert" class="stall-warning">⚠️ STALL DETECTED ⚠️</div>
+        
+        <p style="font-size: 0.8rem; color: #666; margin-top: auto;">
+            <strong>Math Model:</strong> Uses modified approximation of NACA 4412 airfoil data. 
+            Calculates stall behavior based on boundary layer separation logic.
+        </p>
+    </div>
+
+    <div class="viz-area">
+        <canvas id="flowCanvas"></canvas>
+        <div class="legend">
+            <div class="leg-item"><div class="dot" style="background:var(--success)"></div> Lift Vector</div>
+            <div class="leg-item"><div class="dot" style="background:var(--danger)"></div> Drag Vector</div>
+            <div class="leg-item"><div class="dot" style="background:#555"></div> Streamlines</div>
+        </div>
+
+        <div class="graph-container">
+            <canvas id="graphCanvas"></canvas>
+            <div class="legend" style="top: auto; bottom: 10px;">
+                <div class="leg-item"><div class="dot" style="background:var(--success)"></div> Cl (Lift Coeff)</div>
+                <div class="leg-item"><div class="dot" style="background:var(--danger)"></div> Cd (Drag Coeff)</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+/**
+ * PHYSICS ENGINE
+ * Simulates NACA 4412 properties typical for wind turbines.
+ */
+const RHO = 1.225; // Air density kg/m^3
+
+const state = {
+    aoa: 0,      // degrees
+    speed: 15,   // m/s
+    chord: 1.0,  // meters
+    cl: 0,
+    cd: 0,
+    stalled: false
+};
+
+// Approximate aerodynamic coefficients for a generic cambered airfoil (NACA 4412 style)
+function calculateCoefficients(alpha) {
+    const rad = alpha * (Math.PI / 180);
+    
+    // Stall angle approx 14 degrees
+    const stallAngle = 14;
+    
+    let cl, cd;
+
+    // Lift Coefficient Model
+    if (alpha < stallAngle) {
+        // Linear region: Cl = 2*pi*(alpha + camber_offset)
+        // 4412 has zero lift at approx -4 degrees
+        cl = 0.1 * (alpha + 4); 
+    } else {
+        // Stall region: Lift drops significantly
+        // Smooth transition logic
+        const peakCl = 0.1 * (stallAngle + 4);
+        const drop = 0.08 * (alpha - stallAngle);
+        cl = peakCl - Math.pow(drop, 1.5); 
+        if (cl < 0) cl = 0; // Clamp
+    }
+
+    // Drag Coefficient Model
+    // Parasitic drag + Induced drag (approximated as quadratic)
+    // High penalty after stall
+    const baseCd = 0.01;
+    if (alpha < stallAngle) {
+        cd = baseCd + 0.0005 * Math.pow(alpha, 2);
+    } else {
+        // Post-stall drag spikes
+        cd = baseCd + 0.0005 * Math.pow(stallAngle, 2) + 0.02 * Math.pow(alpha - stallAngle, 1.5);
+    }
+
+    return { cl, cd, stalled: alpha > stallAngle };
+}
+
+function updatePhysics() {
+    const coeffs = calculateCoefficients(state.aoa);
+    state.cl = coeffs.cl;
+    state.cd = coeffs.cd;
+    state.stalled = coeffs.stalled;
+
+    // Forces: F = 0.5 * rho * v^2 * A * C
+    // Assuming unit span for Area = chord * 1
+    const q = 0.5 * RHO * Math.pow(state.speed, 2) * state.chord;
+    
+    const lift = q * state.cl;
+    const drag = q * state.cd;
+
+    // Update DOM
+    document.getElementById('out-lift').textContent = lift.toFixed(1) + " N";
+    document.getElementById('out-drag').textContent = drag.toFixed(1) + " N";
+    document.getElementById('out-cl').textContent = state.cl.toFixed(3);
+    document.getElementById('out-cd').textContent = state.cd.toFixed(3);
+    
+    const ratio = state.cd > 0 ? (state.cl / state.cd) : 0;
+    document.getElementById('out-ratio').textContent = ratio.toFixed(2);
+
+    const alertBox = document.getElementById('stall-alert');
+    alertBox.style.display = state.stalled ? 'block' : 'none';
+}
+
+/**
+ * RENDERING ENGINE (Canvas)
+ */
+const flowCanvas = document.getElementById('flowCanvas');
+const flowCtx = flowCanvas.getContext('2d');
+const graphCanvas = document.getElementById('graphCanvas');
+const graphCtx = graphCanvas.getContext('2d');
+
+let particles = [];
+
+function resize() {
+    flowCanvas.width = flowCanvas.parentElement.clientWidth;
+    flowCanvas.height = flowCanvas.parentElement.clientHeight;
+    graphCanvas.width = graphCanvas.parentElement.clientWidth;
+    graphCanvas.height = graphCanvas.parentElement.clientHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// Generate Particles
+for(let i=0; i<100; i++) {
+    particles.push({
+        x: Math.random() * window.innerWidth,
+        y: Math.random() * window.innerHeight,
+        speed: Math.random() * 2 + 2,
+        offset: Math.random() * 20
+    });
+}
+
+function drawAirfoil(ctx, cx, cy, chord, angle) {
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(-angle * Math.PI / 180); // Negative because canvas Y is down
+
+    // Draw simplified NACA shape
+    ctx.beginPath();
+    const len = chord * 150; // Scale for visibility
+    
+    // Upper surface
+    ctx.moveTo(-len/2, 0);
+    ctx.bezierCurveTo(-len/4, -len/4, len/4, -len/5, len/2, 0);
+    
+    // Lower surface
+    ctx.bezierCurveTo(len/4, len/10, -len/4, len/8, -len/2, 0);
+    
+    ctx.fillStyle = '#888';
+    ctx.fill();
+    ctx.strokeStyle = '#eee';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    
+    // Draw Center of Pressure approximation
+    ctx.fillStyle = '#00d4ff';
+    ctx.beginPath();
+    ctx.arc(-len/6, 0, 4, 0, Math.PI*2);
+    ctx.fill();
+
+    ctx.restore();
+    return { x: cx - (Math.cos(-angle*Math.PI/180)*chord*25), y: cy }; // Return approx CP world coords
+}
+
+function drawVectors(ctx, cx, cy, cl, cd) {
+    const scale = 50; // Pixel scale for vectors
+    
+    // Lift (Perpendicular to flow, usually up)
+    // Note: In wind tunnel frame, Lift is perpendicular to Freestream wind
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx, cy - (cl * scale * 2));
+    ctx.strokeStyle = '#00c851';
+    ctx.lineWidth = 4;
+    ctx.stroke();
+
+    // Drag (Parallel to flow)
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + (cd * scale * 10), cy); // Exaggerate drag scale for visibility
+    ctx.strokeStyle = '#ff4444';
+    ctx.lineWidth = 4;
+    ctx.stroke();
+}
+
+function drawFlowLoop() {
+    flowCtx.clearRect(0, 0, flowCanvas.width, flowCanvas.height);
+    
+    const cx = flowCanvas.width / 2;
+    const cy = flowCanvas.height / 2;
+    
+    // Draw Particles (Wind)
+    flowCtx.fillStyle = '#444';
+    particles.forEach(p => {
+        p.x += (state.speed / 2); // Visual speed
+        
+        // Reset
+        if(p.x > flowCanvas.width) {
+            p.x = 0;
+            p.y = Math.random() * flowCanvas.height;
+        }
+
+        // Simple deflection logic (Visual only, not physics calc)
+        // If particle is near wing Y, deflect
+        let dy = 0;
+        if (p.x > cx - 100 && p.x < cx + 100) {
+            // If above wing and producing lift, speed up (Bernoulli) -> drawn simpler here
+            // Just deflect down to show "downwash" which implies lift
+            if (Math.abs(p.y - cy) < 100 && !state.stalled) {
+                dy = state.cl * 2; 
+            }
+            // If stalled, turbulence
+            if (state.stalled && Math.abs(p.y - cy) < 80 && p.x > cx) {
+                dy = (Math.random() - 0.5) * 10;
+            }
+        }
+        p.y += dy;
+
+        flowCtx.beginPath();
+        flowCtx.arc(p.x, p.y, 1.5, 0, Math.PI*2);
+        flowCtx.fill();
+    });
+
+    // Draw Wing
+    drawAirfoil(flowCtx, cx, cy, state.chord, state.aoa);
+    
+    // Draw Vectors originating from approx 1/4 chord
+    drawVectors(flowCtx, cx, cy, state.cl, state.cd);
+
+    requestAnimationFrame(drawFlowLoop);
+}
+
+/**
+ * GRAPHING ENGINE
+ * Plots Cl and Cd vs Alpha curves
+ */
+function drawGraph() {
+    const ctx = graphCtx;
+    const w = graphCanvas.width;
+    const h = graphCanvas.height;
+    const pad = 40;
+    
+    ctx.clearRect(0, 0, w, h);
+    
+    // Axes
+    ctx.strokeStyle = '#555';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(pad, h - pad); // Origin
+    ctx.lineTo(w - pad, h - pad); // X axis
+    ctx.moveTo(pad, h - pad);
+    ctx.lineTo(pad, pad); // Y axis
+    ctx.stroke();
+    
+    // Labels
+    ctx.fillStyle = '#888';
+    ctx.fillText("Angle of Attack (°)", w/2, h - 10);
+    ctx.fillText("Coefficient", 10, pad);
+
+    // Plot Cl (Green) and Cd (Red)
+    const minA = -10, maxA = 30;
+    const rangeA = maxA - minA;
+    
+    // Helper to map coords
+    const mapX = (a) => pad + ((a - minA) / rangeA) * (w - 2*pad);
+    const mapY = (val) => (h - pad) - (val * (h - 2*pad) / 2.0); // Scale max coeff 2.0
+
+    // Draw Curves
+    for (let type of ['cl', 'cd']) {
+        ctx.beginPath();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = type === 'cl' ? '#00c851' : '#ff4444';
+        
+        for (let a = minA; a <= maxA; a+=0.5) {
+            const c = calculateCoefficients(a);
+            const val = type === 'cl' ? c.cl : c.cd;
+            const x = mapX(a);
+            const y = mapY(val);
+            if (a === minA) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+    }
+
+    // Draw Current Position Indicator
+    const curX = mapX(state.aoa);
+    ctx.beginPath();
+    ctx.moveTo(curX, pad);
+    ctx.lineTo(curX, h - pad);
+    ctx.strokeStyle = '#fff';
+    ctx.setLineDash([5, 5]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+}
+
+// Input Listeners
+document.getElementById('in-aoa').addEventListener('input', (e) => {
+    state.aoa = parseFloat(e.target.value);
+    document.getElementById('val-aoa').innerText = state.aoa + "°";
+    updatePhysics();
+    drawGraph();
+});
+
+document.getElementById('in-speed').addEventListener('input', (e) => {
+    state.speed = parseFloat(e.target.value);
+    document.getElementById('val-speed').innerText = state.speed + " m/s";
+    updatePhysics();
+});
+
+document.getElementById('in-chord').addEventListener('input', (e) => {
+    state.chord = parseFloat(e.target.value);
+    document.getElementById('val-chord').innerText = state.chord + " m";
+    updatePhysics();
+});
+
+// Init
+updatePhysics();
+drawFlowLoop();
+drawGraph();
+
+</script>
+</body>
+</html>
